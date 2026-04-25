@@ -1,36 +1,43 @@
 // -*- mode: js2; indent-tabs-mode: nil; js2-basic-offset: 4 -*-
 //
-import Clutter from 'gi://Clutter';
-import Gio from 'gi://Gio';
-import GLib from 'gi://GLib';
-import Gdk from 'gi://Gdk';
-import St from 'gi://St';
-import UPower from 'gi://UPowerGlib';
+import Clutter from "gi://Clutter";
+import Gio from "gi://Gio";
+import GLib from "gi://GLib";
+import Gdk from "gi://Gdk";
+import St from "gi://St";
+import UPower from "gi://UPowerGlib";
 
-import {Extension, gettext as _} from 'resource:///org/gnome/shell/extensions/extension.js';
+import { Extension, gettext as _ } from "resource:///org/gnome/shell/extensions/extension.js";
 
-import * as Main from 'resource:///org/gnome/shell/ui/main.js';
-import * as MessageTray from 'resource:///org/gnome/shell/ui/messageTray.js';
-import * as Overview from 'resource:///org/gnome/shell/ui/overview.js';
-import { loadInterfaceXML } from 'resource:///org/gnome/shell/misc/fileUtils.js';
-
+import * as Main from "resource:///org/gnome/shell/ui/main.js";
+import * as MessageTray from "resource:///org/gnome/shell/ui/messageTray.js";
+import * as Overview from "resource:///org/gnome/shell/ui/overview.js";
+import { loadInterfaceXML } from "resource:///org/gnome/shell/misc/fileUtils.js";
 
 const MANUAL_FADE_TIME = 0.3;
 const STANDARD_FADE_TIME = 10;
 
-const UPOWER_BUS_NAME = 'org.freedesktop.UPower';
-const UPOWER_OBJECT_PATH = '/org/freedesktop/UPower/devices/DisplayDevice';
-const DisplayDeviceInterface = loadInterfaceXML('org.freedesktop.UPower.Device');
+const UPOWER_BUS_NAME = "org.freedesktop.UPower";
+const UPOWER_OBJECT_PATH = "/org/freedesktop/UPower/devices/DisplayDevice";
+const DisplayDeviceInterface = loadInterfaceXML("org.freedesktop.UPower.Device");
 const PowerManagerProxy = Gio.DBusProxy.makeProxyWrapper(DisplayDeviceInterface);
 
-const UPowerIface = loadInterfaceXML('org.freedesktop.UPower');
+const UPowerIface = loadInterfaceXML("org.freedesktop.UPower");
 const UPowerProxy = Gio.DBusProxy.makeProxyWrapper(UPowerIface);
 
-const BUS_NAME = 'org.gnome.Mutter.DisplayConfig';
-const OBJECT_PATH = '/org/gnome/Mutter/DisplayConfig';
+const BUS_NAME = "org.gnome.Mutter.DisplayConfig";
+const OBJECT_PATH = "/org/gnome/Mutter/DisplayConfig";
 
-const DisplayConfigIface = '<node> \
+const DisplayConfigIface =
+    '<node> \
 <interface name="org.gnome.Mutter.DisplayConfig"> \
+    <method name="GetCurrentState"> \
+        <arg name="serial" direction="out" type="u" /> \
+        <arg name="monitors" direction="out" type="a((ssss)a(siiddada{sv})a{sv})" /> \
+        <arg name="logical_monitors" direction="out" type="a(iiduba(ssss)a{sv})" /> \
+        <arg name="properties" direction="out" type="a{sv}" /> \
+    </method> \
+    <signal name="MonitorsChanged"/> \
     <property name="PowerSaveMode" type="i" access="readwrite"/> \
 </interface> \
 </node>';
@@ -39,8 +46,17 @@ const DisplayConfigProxy = Gio.DBusProxy.makeProxyWrapper(DisplayConfigIface);
 
 class Unblank {
     constructor(settings) {
+        console.warn(DisplayConfigIface);
+
         this.gsettings = settings;
-        this.proxy = new DisplayConfigProxy(Gio.DBus.session, BUS_NAME, OBJECT_PATH, () => {});
+        this.proxy = new DisplayConfigProxy(Gio.DBus.session, BUS_NAME, OBJECT_PATH,  (proxy, error) => {
+           if (error) {
+               console.warn("DisplayConfig proxy error:", error.message);
+               return;
+           }
+           console.warn("DisplayConfig proxy initialized:", proxy);
+       });
+        console.warn(this.proxy);
 
         this.setActiveOrigin = Main.screenShield._setActive;
         this.activateFadeOrigin = Main.screenShield._activateFade;
@@ -54,18 +70,26 @@ class Unblank {
         this._activeOnce = false;
         this.enabled = false;
 
-        //this.powerProxy = new PowerManagerProxy(Gio.DBus.system, UPOWER_BUS_NAME, UPOWER_OBJECT_PATH,
-        this.powerProxy = new UPowerProxy(Gio.DBus.system,
-                                           'org.freedesktop.UPower',
-                                           '/org/freedesktop/UPower',
-                                                (proxy, error) => {
-                                                    if (error) {
-                                                        log(error.message);
-                                                        return;
-                                                    }
-                                                    this.powerProxy.connect('g-properties-changed',
-                                                                            this._onPowerChanged.bind(this));
-                                                    this._onPowerChanged(); });
+        this.powerProxy = new UPowerProxy(Gio.DBus.system, "org.freedesktop.UPower", "/org/freedesktop/UPower", (proxy, error) => {
+            if (error) {
+                log(error.message);
+                return;
+            }
+            this.powerProxy.connect("g-properties-changed", this._onPowerChanged.bind(this));
+            this._onPowerChanged();
+        });
+
+        try {
+               proxy.GetCurrentStateRemote((serial, monitors, logical_monitors, properties, error) => {
+                   if (error) {
+                       console.warn("GetCurrentState error:", error.message);
+                   } else {
+                       console.warn("GetCurrentState succeeded! :", monitors);
+                   }
+               });
+           } catch (e) {
+               console.warn("GetCurrentState threw:", e.message);
+           }
     }
 
     enable() {
@@ -85,21 +109,20 @@ class Unblank {
     }
 
     isUnblank() {
-        this.isOnBattery = (this.gsettings.get_boolean('power') && this.powerProxy.OnBattery);
+        this.isOnBattery = this.gsettings.get_boolean("power") && this.powerProxy.OnBattery;
         return !this.isOnBattery;
     }
 
     _onPowerChanged() {
-        this.isOnBattery = (this.gsettings.get_boolean('power') && this.powerProxy.OnBattery);
+        this.isOnBattery = this.gsettings.get_boolean("power") && this.powerProxy.OnBattery;
 
         if (Main.screenShield._isActive) {
             if (this.isOnBattery) {
-                Main.screenShield.emit('active-changed');
+                Main.screenShield.emit("active-changed");
                 Main.screenShield.activate(false);
                 this._activeOnce = true;
                 //_turnOffMonitor();
-            } else
-                _turnOnMonitor();
+            } else _turnOnMonitor();
         }
     }
 }
@@ -111,7 +134,7 @@ function _setActive(active) {
 
     if (prevIsActive != this._isActive) {
         if (!unblank.isUnblank() || unblank._activeOnce) {
-            this.emit('active-changed');
+            this.emit("active-changed");
             unblank._activeOnce = false;
         }
     }
@@ -121,8 +144,7 @@ function _setActive(active) {
         _deactiveTimer();
     }
 
-    if (this._loginSession)
-        this._loginSession.SetLockedHintRemote(active);
+    if (this._loginSession) this._loginSession.SetLockedHintRemote(active);
 
     this._syncInhibitor();
 }
@@ -136,20 +158,20 @@ function _activateFade(lightbox, time) {
     Main.uiGroup.set_child_above_sibling(lightbox, null);
     if (unblank.isUnblank() && !this._isActive) {
         lightbox.lightOn(time);
-        unblank.hideLightboxId = GLib.timeout_add(GLib.PRIORITY_DEFAULT, time + 1000,
-                                                      () => { lightbox.lightOff();
-                                                              _activateTimer();
-                                                              unblank.hideLightboxId = 0;
-                                                              return GLib.SOURCE_REMOVE; });
+        unblank.hideLightboxId = GLib.timeout_add(GLib.PRIORITY_DEFAULT, time + 1000, () => {
+            lightbox.lightOff();
+            _activateTimer();
+            unblank.hideLightboxId = 0;
+            return GLib.SOURCE_REMOVE;
+        });
     } else {
         lightbox.lightOn(time);
     }
 
-    if (this._becameActiveId == 0)
-        this._becameActiveId = this.idleMonitor.add_user_active_watch(this._onUserBecameActive.bind(this))
+    if (this._becameActiveId == 0) this._becameActiveId = this.idleMonitor.add_user_active_watch(this._onUserBecameActive.bind(this));
 }
 
-function  _onUserBecameActive() {
+function _onUserBecameActive() {
     if (this._becameActiveId != 0) {
         this.idleMonitor.remove_watch(this._becameActiveId);
         this._becameActiveId = 0;
@@ -157,7 +179,7 @@ function  _onUserBecameActive() {
 
     if (unblank.hideLightboxId != 0) {
         GLib.source_remove(unblank.hideLightboxId);
-        unblank.hideLightboxId= 0;
+        unblank.hideLightboxId = 0;
     }
     //_deactiveTimer();
     //_turnOnMonitor();
@@ -172,8 +194,7 @@ function  _onUserBecameActive() {
 
 function _resetLockScreen(params) {
     _activateTimer();
-    if (this._lockScreenState != MessageTray.State.HIDDEN)
-        return;
+    if (this._lockScreenState != MessageTray.State.HIDDEN) return;
 
     this._lockScreenGroup.show();
     this._lockScreenState = MessageTray.State.SHOWING;
@@ -206,14 +227,14 @@ function _resetLockScreen(params) {
 
 function _changeToBlank() {
     if (!unblank._activeOnce) {
-        Main.screenShield.emit('active-changed');
+        Main.screenShield.emit("active-changed");
         unblank._activeOnce = true;
     }
 }
 
 function _activateTimer() {
     _deactiveTimer();
-    let timer = unblank.gsettings.get_int('time');
+    let timer = unblank.gsettings.get_int("time");
     if (timer != 0) {
         unblank._turnOffMonitorId = GLib.timeout_add_seconds(GLib.PRIORITY_DEFAULT, timer, () => {
             _changeToBlank();
@@ -221,7 +242,7 @@ function _activateTimer() {
             unblank._turnOffMonitorId = 0;
             return GLib.SOURCE_REMOVE;
         });
-        GLib.Source.set_name_by_id(unblank._turnOffMonitorId, '[gnome-shell] this._turnOffMonitor');
+        GLib.Source.set_name_by_id(unblank._turnOffMonitorId, "[gnome-shell] this._turnOffMonitor");
     }
 }
 
@@ -251,18 +272,16 @@ export default class PanelScrollExtension extends Extension {
     enable() {
         this._settings = this.getSettings();
 
-        if (enabled)
-            return;
+        if (enabled) return;
         unblank = new Unblank(this._settings);
         unblank.enable();
         enabled = true;
-
     }
 
     disable() {
         if (!Main.sessionMode.isLocked) {
             unblank.disable();
-            unblank = null
+            unblank = null;
             enabled = false;
             this._settings = null;
         }
